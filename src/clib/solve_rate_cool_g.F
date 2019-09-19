@@ -807,12 +807,18 @@ c      chunit = (7.17775e-12_DKIND)/(2._DKIND*uvel*uvel*mh)   ! 4.5 eV per H2 fo
          enddo
 
          if(iter .gt. itmax) then
-            !shorten timestep and try again
-            dt_local = dt*0.1_DKIND
+            !shorten timestep and try again, reset everything
+            dt_local = dt_local*0.1_DKIND
+            if(dt_local < 31.55) then
+               write(0,*) 'dt_local is too short'
+               write(0,*) 'cannot converge chemical network'
+               goto 9999
+             endif
             conv = 0
             do i = is+1, ie+1
                ttot(i) = 0._DKIND
             enddo
+            iter = 1
          else
             conv = 1
          endif
