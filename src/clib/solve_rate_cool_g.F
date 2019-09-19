@@ -284,8 +284,11 @@
      &       reHII(in), reHeII1(in), reHeII2(in), reHeIII(in),
      &       brem(in), edot(in)
       real*8 hyd01k(in), h2k01(in), vibh(in), roth(in), rotl(in),
-     &       gpldl(in), gphdl(in), hdlte(in), hdlow(in), cieco(in)
+     &     gpldl(in), gphdl(in), hdlte(in), hdlow(in), cieco(in)
 
+!     Subcycling locals
+      real*8 dt_local
+      integer conv
 !  Iteration mask
 
       logical itmask(in)
@@ -416,6 +419,22 @@ c      chunit = (7.17775e-12_DKIND)/(2._DKIND*uvel*uvel*mh)   ! 4.5 eV per H2 fo
             ttot(i) = 0._DKIND
          enddo
 
+
+!        For instances where the radiation is occuring at very high densities
+!        the timestep can be too long and the chemical network doesn't converge (in Enzo
+!        simulations at least).
+!        The following fix is adapted from Gen Chiaki's fork of grackle.
+!        Two additional loops are added around the subcycle loop to super-subcycle the
+!        timestep. The inner loop, itr1, shortens the timestep, dt_local, until 
+!        the chemistry network converges. The outer loop, itr2, integrates the
+!        new timestep until the system reaches the original timestep dt.
+
+         conv = 0
+
+         dt_local = dt
+            
+         do while (conv == 0)   !subcycle loop
+            
 !        ------------------ Loop over subcycles ----------------
 
          do iter = 1, itmax
@@ -546,12 +565,14 @@ c      chunit = (7.17775e-12_DKIND)/(2._DKIND*uvel*uvel*mh)   ! 4.5 eV per H2 fo
                   HIdot(i) = min(abs(HIdot(i)), abs(HIdot_prev(i)))
                endif
 
+!              Compute timestep, dtit, for the first time. Uses dt_local as one option. 
+               
 !              compute minimum rate timestep
 
                olddtit = dtit(i)
                dtit(i) = min(abs(0.1_DKIND*de(i,j,k)/dedot(i)), 
      &              abs(0.1_DKIND*HI(i,j,k)/HIdot(i)),
-     &              dt-ttot(i), 0.5_DKIND*dt)
+     &              dt_local-ttot(i), 0.5_DKIND*dt_local)
 
                if (d(i,j,k)*dom .gt. 1e8_DKIND .and. 
      &              edot(i) .gt. 0._DKIND) then
@@ -601,7 +622,8 @@ c      chunit = (7.17775e-12_DKIND)/(2._DKIND*uvel*uvel*mh)   ! 4.5 eV per H2 fo
 #ifdef _OPENMP
 !$omp end critical
 #endif
-                endif
+               endif
+!               Compute timestep for second time (if density is high).
                 dtit(i) = min(dtit(i), 0.1_DKIND*heq/dheq)
               endif
               if (iter.gt.10_DKIND) then
@@ -612,14 +634,14 @@ c      chunit = (7.17775e-12_DKIND)/(2._DKIND*uvel*uvel*mh)   ! 4.5 eV per H2 fo
 #ifdef WRITE_COOLING_DEBUG
 !              Output some debugging information if required
 
-               if (dtit(i)/dt .lt. 1.0e-2_DKIND .and.
+               if (dtit(i)/dt_local .lt. 1.0e-2_DKIND .and.
      &             iter .gt. 800 .and.
-     &             abs((dt-ttot(i))/dt) .gt. 1.0e-3_DKIND) then
+     &             abs((dt_local-ttot(i))/dt_local) .gt. 1.0e-3_DKIND) then
 #ifdef _OPENMP
 !$omp critical
 #endif
                   write(4,1000) iter,i,j,k,dtit(i),
-     &              ttot(i),dt,de(i,j,k),dedot(i),HI(i,j,k),HIdot(i),
+     &              ttot(i),dt_local,de(i,j,k),dedot(i),HI(i,j,k),HIdot(i),
      &              tgas(i), dedot_prev(i), HIdot_prev(i)
                   write(4,1100) HI(i,j,k),HII(i,j,k),
      &              HeI(i,j,k),HeII(i,j,k),HeIII(i,j,k),
@@ -650,7 +672,7 @@ c      chunit = (7.17775e-12_DKIND)/(2._DKIND*uvel*uvel*mh)   ! 4.5 eV per H2 fo
  1100          format(1p,22(e11.3))
 #endif /* WRITE_COOLING_DEBUG */
             else               ! itmask
-               dtit(i) = dt;
+               dtit(i) = dt_local;
             endif
             enddo               ! end loop over i
 
@@ -675,18 +697,18 @@ c      chunit = (7.17775e-12_DKIND)/(2._DKIND*uvel*uvel*mh)   ! 4.5 eV per H2 fo
 	       if (abs(edot(i)) .lt. tiny8) edot(i) = tiny8
 
 !              Compute timestep for 10% change
-
+!              Compute timestep for third time
                   dtit(i) = min(real(abs(0.1_DKIND*
      &              energy/edot(i)), DKIND), 
-     &              dt-ttot(i), dtit(i))
+     &              dt_local-ttot(i), dtit(i))
 
-               if (dtit(i) .ne. dtit(i)) then
+               if (dtit(i) .ne. dtit(i)) then   !NAN detection
 #ifdef _OPENMP
 !$omp critical
 #endif
                  write(6,*) 'HUGE dtit :: ', energy, edot(i), dtit(i),
-     &                      dt, ttot(i), abs(0.1_DKIND*energy/edot(i)), 
-     &                      real(abs(0.1_DKIND*energy/edot(i)), DKIND)
+     &                  dt_local, ttot(i), abs(0.1_DKIND*energy/edot(i)), 
+     &                  real(abs(0.1_DKIND*energy/edot(i)), DKIND)
 #ifdef _OPENMP
 !$omp end critical
 #endif
@@ -695,9 +717,11 @@ c      chunit = (7.17775e-12_DKIND)/(2._DKIND*uvel*uvel*mh)   ! 4.5 eV per H2 fo
 #ifdef WRITE_COOLING_DEBUG
 !              If the timestep is too small, then output some debugging info
 
-               if (((dtit(i)/dt .lt. 1.0e-2_DKIND .and. iter .gt. 800) 
+               if (((dtit(i)/dt_local .lt. 1.0e-2_DKIND
+     &               .and. iter .gt. 800) 
      &               .or. iter .gt. itmax-100) .and.
-     &              abs((dt-ttot(i))/dt) .gt. 1.0e-3_DKIND) then
+     &              abs((dt_local-ttot(i))/dt_local)
+     &               .gt. 1.0e-3_DKIND) then
 #ifdef _OPENMP
 !$omp critical
 #endif
@@ -764,20 +788,37 @@ c      chunit = (7.17775e-12_DKIND)/(2._DKIND*uvel*uvel*mh)   ! 4.5 eV per H2 fo
 
             ttmin = huge8
             do i = is+1, ie+1
-               ttot(i) = min(ttot(i) + dtit(i), dt)
-               if (abs(dt-ttot(i)) .lt.
-     &              tolerance*dt) itmask(i) = .false.
+!              ttot is the minimum of the hydro timestep and
+!              the integrated dtdit for each cell
+!              ttmin is the minimum elapsed time for the slice 
+               ttot(i) = min(ttot(i) + dtit(i), dt_local)
+               if (abs(dt_local-ttot(i)) .lt.
+     &              tolerance*dt_local) itmask(i) = .false.
                if (ttot(i).lt.ttmin) ttmin = ttot(i)
             enddo
 
 !           If all cells are done (on this slice), then exit
 
-            if (abs(dt-ttmin) .lt. tolerance*dt) go to 9999
+            if (abs(dt_local-ttmin) .lt.
+     &               tolerance*dt_local) go to 9999
 
 !           Next subcycle iteration
 
          enddo
 
+         if(iter .gt. itmax) then
+            !shorten timestep and try again
+            dt_local = dt*0.1_DKIND
+            conv = 0
+            do i = is+1, ie+1
+               ttot(i) = 0._DKIND
+            enddo
+         else
+            conv = 1
+         endif
+         
+      enddo !end of itr1 of subcycling. 
+         
  9999    continue
 
 !       Abort if iteration count exceeds maximum
@@ -812,7 +853,7 @@ c            WARNING_MESSAGE
 !     
 !     Next j,k
 !     
-      enddo
+      enddo 
 #ifdef _OPENMP
 !$omp end parallel do
 #endif
